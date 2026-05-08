@@ -6,6 +6,8 @@ const auth = require('../middleware/auth');
 const adminOnly = require('../middleware/adminOnly');
 const logger = require('../logger');
 
+const CONTRACT_STATUSES = new Set(['signed', 'unsigned']);
+
 // 自动生成唯一 ID：yyyyMMdd-时间戳
 const generateIdFromStart = (start) => {
     const d = new Date(start);
@@ -14,6 +16,44 @@ const generateIdFromStart = (start) => {
     const dd = String(d.getDate()).padStart(2, '0');
     return `${yyyy}${mm}${dd}-${Date.now()}`;
 };
+
+function normalizeContractStatus(value) {
+    return CONTRACT_STATUSES.has(value) ? value : 'unsigned';
+}
+
+function normalizeProjectPayload(input = {}) {
+    const {
+        address,
+        city,
+        state,
+        zipcode,
+        year,
+        insurance,
+        type,
+        company,
+        referrer,
+        manager,
+        start,
+        end,
+        contractStatus,
+    } = input;
+
+    return {
+        address: address || null,
+        city: city || null,
+        state: state || null,
+        zipcode: zipcode || null,
+        year: year || null,
+        insurance: insurance || null,
+        type: type || null,
+        company: company || null,
+        referrer: referrer || null,
+        manager: manager || null,
+        contractStatus: normalizeContractStatus(contractStatus),
+        start: start ? new Date(start) : null,
+        end: end ? new Date(end) : null,
+    };
+}
 
 // GET /api/tasks?page=1&pageSize=100
 router.get('/', async (req, res) => {
@@ -29,7 +69,10 @@ router.get('/', async (req, res) => {
                          .skip(skip)
                          .limit(pageSize);
         const total = await db.collection('projects').countDocuments();
-        const data = await cursor.toArray();
+        const data = (await cursor.toArray()).map(project => ({
+            ...project,
+            contractStatus: normalizeContractStatus(project.contractStatus),
+        }));
         res.json({ data, total });
     } catch (e) {
         logger.error(`【项目列表】异常: ${e.stack || e.message}`);
@@ -46,7 +89,10 @@ router.get('/:_id', async (req, res) => {
             logger.warn(`【项目详情】获取失败（未找到）: _id=${req.params._id}`);
             return res.status(404).json({ error: '项目未找到' });
         } 
-        res.json(project);
+        res.json({
+            ...project,
+            contractStatus: normalizeContractStatus(project.contractStatus),
+        });
     } catch (e) {
         logger.error(`【项目详情】异常: ${e.stack || e.message}`);
         res.status(500).json({ error: e.message });
@@ -67,18 +113,7 @@ router.post('/', auth, adminOnly, async (req, res) => {
         // 必填字段按你的表结构补全
         await db.collection('projects').insertOne({
             _id: _id,
-            address: rest.address || null,
-            city: rest.city || null,
-            state: rest.state || null,
-            zipcode: rest.zipcode || null,
-            year: rest.year || null,
-            insurance: rest.insurance || null,
-            type: rest.type || null,
-            company: rest.company || null,
-            referrer: rest.referrer || null,
-            manager: rest.manager || null,
-            start: start ? new Date(start) : null,
-            end: rest.end ? new Date(rest.end) : null,
+            ...normalizeProjectPayload({ start, ...rest }),
         });
         // 进度表初始化
         await db.collection('progress').insertOne({
@@ -114,7 +149,10 @@ router.post('/', auth, adminOnly, async (req, res) => {
         });
         //logger.info(`【项目新增】新建: _id=${_id}, by=${req.user && req.user.username}`);
         const project = await db.collection('projects').findOne({ _id: _id });
-        res.status(201).json(project);
+        res.status(201).json({
+            ...project,
+            contractStatus: normalizeContractStatus(project.contractStatus),
+        });
     } catch (e) {
         logger.error(`【项目新增】异常: ${e.stack || e.message}`);
         res.status(500).json({ error: e.message });
@@ -127,10 +165,10 @@ router.put('/:_id', auth, adminOnly, async (req, res) => {
     try {
         const db = await getMongoDb();
         // 这里只做全字段更新（一般业务可先查再改，也可直接update）
-        const { address, city, state, zipcode, year, insurance, type, company, referrer, manager, start, end } = req.body;
+        const projectPayload = normalizeProjectPayload(req.body);
         const result = await db.collection('projects').updateOne(
             { _id: req.params._id },
-            { $set: { address, city, state, zipcode, year, insurance, type, company, referrer, manager, start, end } }
+            { $set: projectPayload }
         );
         if (!result.matchedCount) {
             logger.warn(`【项目更新】失败（未找到）: _id=${req.params._id}, by=${req.user && req.user.username}`);
@@ -138,7 +176,10 @@ router.put('/:_id', auth, adminOnly, async (req, res) => {
         }
         //logger.info(`【项目更新】完全更新: _id=${req.params._id}, by=${req.user && req.user.username}`);
         const project = await db.collection('projects').findOne({ _id: req.params._id });
-        res.json(project);
+        res.json({
+            ...project,
+            contractStatus: normalizeContractStatus(project.contractStatus),
+        });
     } catch (e) {
         logger.error(`【项目更新】异常: ${e.stack || e.message}`);
         res.status(500).json({ error: e.message });
@@ -152,6 +193,15 @@ router.patch('/:_id', auth, adminOnly, async (req, res) => {
         const db = await getMongoDb();
         // 只更新传入的字段
         const updateFields = { ...req.body };
+        if (Object.prototype.hasOwnProperty.call(updateFields, 'contractStatus')) {
+            updateFields.contractStatus = normalizeContractStatus(updateFields.contractStatus);
+        }
+        if (Object.prototype.hasOwnProperty.call(updateFields, 'start')) {
+            updateFields.start = updateFields.start ? new Date(updateFields.start) : null;
+        }
+        if (Object.prototype.hasOwnProperty.call(updateFields, 'end')) {
+            updateFields.end = updateFields.end ? new Date(updateFields.end) : null;
+        }
         const result = await db.collection('projects').updateOne(
             { _id: req.params._id },
             { $set: updateFields }
@@ -162,7 +212,10 @@ router.patch('/:_id', auth, adminOnly, async (req, res) => {
         }
         //logger.info(`【项目字段更新】_id=${req.params._id}, by=${req.user && req.user.username}, fields=${Object.keys(updateFields).join(',')}`);
         const project = await db.collection('projects').findOne({ _id: req.params._id });
-        res.json(project);
+        res.json({
+            ...project,
+            contractStatus: normalizeContractStatus(project.contractStatus),
+        });
     } catch (e) {
         logger.error(`【项目字段更新】异常: ${e.stack || e.message}`);
         res.status(500).json({ error: e.message });
